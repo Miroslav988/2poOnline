@@ -1,10 +1,11 @@
 <template>
   <div class="grid-container">
-    <div class="background"></div>
-    <!-- Верхняя секция -->
+    <div class="background-container">
+      <div class="background" :class="{ active: isCurrentBackground }"></div>
+      <div class="background" :class="{ active: !isCurrentBackground }"></div>
+    </div>
     <div class="top-section"></div>
 
-    <!-- Центральная секция -->
     <div class="middle-section">
       <button class="nav-button" @click="prevBackground">‹</button>
       <button
@@ -13,9 +14,6 @@
         class="play-button"
         :style="{ boxShadow: boxShadow }"
       >
-        <div v-if="isLoading" class="loader-container">
-          <div class="loader"></div>
-        </div>
         <div v-if="isPlaying" class="controls">
           <label for="volume"></label>
           <input
@@ -32,7 +30,6 @@
       <button class="nav-button" @click="nextBackground">›</button>
     </div>
 
-    <!-- Нижняя секция -->
     <div class="bottom-section">
       <h3>{{ trackTitle }}</h3>
       <h3>{{ trackArtist }}</h3>
@@ -54,7 +51,6 @@ export default {
     return {
       audio: null,
       isPlaying: false,
-      isLoading: false,
       trackTitle: "",
       trackArtist: "",
       boxShadow: "0 4px 10px #56ff086f",
@@ -62,25 +58,42 @@ export default {
       base: Airtable.base("app4KfOz94tUagKgW"),
       currentBackgroundIndex: 0,
       allRecords: [],
+      nextTrack: null,
+      loadedBackgrounds: [],
+      isBackgroundChanging: false,
+      isCurrentBackground: true,
+      prevBackgroundIndex: 0,
     };
   },
   async mounted() {
+    // Загружаем все фоны
     const backgrounds = await this.base("backgrounds")
       .select({ view: "back" })
       .all();
 
     if (backgrounds.length > 0) {
+      // Предзагружаем все фоны
+      this.loadedBackgrounds = await Promise.all(
+        backgrounds.map(async (bg) => {
+          const img = new Image();
+          img.src = bg.fields.File[0].url;
+          await img.decode();
+          return img.src;
+        })
+      );
+
       this.currentBackgroundIndex = Math.floor(
         Math.random() * backgrounds.length
       );
-      const backgroundUrl =
-        backgrounds[this.currentBackgroundIndex].fields.File[0].url;
       const background = document.querySelector(".background");
-      background.style.backgroundImage = `url(${backgroundUrl})`;
+      background.style.backgroundImage = `url(${
+        this.loadedBackgrounds[this.currentBackgroundIndex]
+      })`;
     }
 
     // Загружаем все треки
     await this.loadAllRecords();
+    await this.preloadNextTrack();
   },
   methods: {
     async loadAllRecords() {
@@ -88,37 +101,60 @@ export default {
         .select({ view: "musicInfo" })
         .all();
     },
-    async nextBackground() {
-      const backgrounds = await this.base("backgrounds")
-        .select({ view: "back" })
-        .all();
-      if (backgrounds.length === 0) return;
 
-      this.currentBackgroundIndex =
-        (this.currentBackgroundIndex + 1) % backgrounds.length;
-      const background = document.querySelector(".background");
-      background.style.backgroundImage = `url(${
-        backgrounds[this.currentBackgroundIndex].fields.File[0].url
+    async changeBackground(direction) {
+      if (this.isBackgroundChanging || this.loadedBackgrounds.length === 0)
+        return;
+
+      this.isBackgroundChanging = true;
+      const backgrounds = document.querySelectorAll(".background");
+      const currentBg = backgrounds[this.isCurrentBackground ? 0 : 1];
+      const nextBg = backgrounds[this.isCurrentBackground ? 1 : 0];
+
+      // Установка нового фона
+      nextBg.style.backgroundImage = `url(${
+        this.loadedBackgrounds[
+          direction === "next"
+            ? (this.currentBackgroundIndex + 1) % this.loadedBackgrounds.length
+            : (this.currentBackgroundIndex -
+                1 +
+                this.loadedBackgrounds.length) %
+              this.loadedBackgrounds.length
+        ]
       })`;
+
+      // Анимация сдвига
+      currentBg.style.transform = `translateX(${
+        direction === "next" ? "-100%" : "100%"
+      })`;
+      nextBg.style.transform = "translateX(0)";
+      nextBg.style.opacity = 1;
+
+      await new Promise((resolve) => setTimeout(resolve, 800));
+
+      // Обновление индекса
+      this.currentBackgroundIndex =
+        direction === "next"
+          ? (this.currentBackgroundIndex + 1) % this.loadedBackgrounds.length
+          : (this.currentBackgroundIndex - 1 + this.loadedBackgrounds.length) %
+            this.loadedBackgrounds.length;
+      this.isCurrentBackground = !this.isCurrentBackground;
+      this.isBackgroundChanging = false;
+
+      // Управление слоями
+      currentBg.style.zIndex = 0;
+      nextBg.style.zIndex = 1;
+    },
+
+    async nextBackground() {
+      await this.changeBackground("next");
     },
 
     async prevBackground() {
-      const backgrounds = await this.base("backgrounds")
-        .select({ view: "back" })
-        .all();
-
-      if (backgrounds.length === 0) return;
-
-      this.currentBackgroundIndex =
-        (this.currentBackgroundIndex - 1 + backgrounds.length) %
-        backgrounds.length;
-      const background = document.querySelector(".background");
-      background.style.backgroundImage = `url(${
-        backgrounds[this.currentBackgroundIndex].fields.File[0].url
-      })`;
+      await this.changeBackground("prev");
     },
-    async playRandomTrack() {
-      this.isLoading = true;
+
+    async preloadNextTrack() {
       try {
         const randomIndex = Math.floor(Math.random() * this.allRecords.length);
         const randomTrack = this.allRecords[randomIndex].fields;
@@ -127,26 +163,44 @@ export default {
           if (this.playedTracks.length === this.allRecords.length) {
             this.playedTracks = [];
           } else {
-            return this.playRandomTrack();
+            return this.preloadNextTrack();
           }
         }
-
-        this.trackTitle = randomTrack.NAME;
-        this.trackArtist = randomTrack.Artist;
 
         const response = await fetch(randomTrack.File[0].url);
         const blob = await response.blob();
         const objectURL = URL.createObjectURL(blob);
-        this.audio = new Audio(objectURL);
+        this.nextTrack = {
+          audio: new Audio(objectURL),
+          title: randomTrack.NAME,
+          artist: randomTrack.Artist,
+          cover: randomTrack.Cover?.[0]?.url,
+        };
+      } catch (error) {
+        console.error("Ошибка при прелоаде трека:", error);
+      }
+    },
 
-        if (randomTrack.Cover && randomTrack.Cover[0]) {
+    async playRandomTrack() {
+      if (!this.nextTrack) return;
+
+      try {
+        // Используем предзагруженный трек
+        this.trackTitle = this.nextTrack.title;
+        this.trackArtist = this.nextTrack.artist;
+        this.audio = this.nextTrack.audio;
+
+        if (this.nextTrack.cover) {
           const background = document.querySelector(".play-button");
-          background.style.backgroundImage = `url(${randomTrack.Cover[0].url})`;
+          background.style.backgroundImage = `url(${this.nextTrack.cover})`;
         }
 
         this.audio.play();
         this.isPlaying = true;
-        this.playedTracks.push(randomTrack.NAME);
+        this.playedTracks.push(this.trackTitle);
+
+        // Сразу загружаем следующий трек
+        await this.preloadNextTrack();
 
         this.audioContext = new (window.AudioContext ||
           window.webkitAudioContext)();
@@ -158,21 +212,14 @@ export default {
         this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
 
         this.updateAnimation();
+
         this.audio.onended = async () => {
-          this.isPlaying = false;
-          try {
+          if (this.nextTrack) {
             await this.playRandomTrack();
-          } catch (error) {
-            console.error(
-              "Ошибка при воспроизведении следующего трека:",
-              error
-            );
           }
         };
       } catch (error) {
         console.error("Ошибка:", error);
-      } finally {
-        this.isLoading = false;
       }
     },
 
@@ -194,6 +241,7 @@ export default {
 </script>
 
 <style>
+/* Все существующие стили остаются без изменений */
 .grid-container {
   display: grid;
   grid-template-rows: 1fr 2fr 1fr;
@@ -231,7 +279,27 @@ export default {
   height: 100%;
   background-size: cover;
   background-position: center;
+  transition: transform 0.8s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.8s ease-in-out;
+}
+
+.background:first-child {
+  z-index: 1;
+}
+
+.background:last-child {
+  z-index: 0;
+}
+
+.background-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
   z-index: -1;
+  background-image: url("../public/photo_2024-10-25_22-04-06.jpg");
 }
 
 .play-button {
@@ -279,30 +347,5 @@ input[type="range"]::-webkit-slider-thumb {
   background: #56ff08;
   border-radius: 50%;
   cursor: pointer;
-}
-
-.loader-container {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-}
-
-.loader {
-  border: 4px solid rgba(86, 255, 8, 0.2);
-  border-top: 4px solid #56ff08;
-  border-radius: 50%;
-  width: 40px;
-  height: 40px;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
 }
 </style>
